@@ -16,7 +16,7 @@
 #define MSG_SIZE 256
 
 int numTableEntries;
-int origSocket; // Socket for accepting connections
+int origSocket; // Socket for accepting connections (i.e. the fd)
 pthread_mutex_t mutex;
 
 // struct for entries of the table
@@ -45,7 +45,7 @@ void get_timestamp(struct timespec *ts) {
     }
 }
 
-void *routine() {
+void *workerThread() {
     // Loop to keep server connecting to clients
     int flagConnect = 1; // Set to 0 to quit
 
@@ -56,11 +56,13 @@ void *routine() {
         char buf[MSG_SIZE]; // Buffer for sending and receiving data
 
         // Accept a connection
+        pthread_mutex_lock(&mutex); // Lock around accept to prevent race condition
         lengthClientName = sizeof(client_addr);
         if ((newSocket = accept(origSocket, (struct sockaddr *)&client_addr, &lengthClientName)) == -1) {
             perror("Accept()");
             exit(5);
         }
+        pthread_mutex_unlock(&mutex);
 
         // Receive message on the socket, put contents in buf
         if (recv(newSocket, buf, sizeof(buf), 0) == -1) {
@@ -90,10 +92,14 @@ void *routine() {
         // 4. Record the number of bytes that make up the value portion of the body
         uint32_t valueLen = tmpHeader.total_body_length - tmpHeader.extras_length - tmpHeader.key_length;
         // 5. Create buffers to hold copies of the key and value
-        char key[256] = {0}; // Initialized to 0s to ensure it's null-terminated
-        memcpy(key, pKey, tmpHeader.key_length);
-        char value[4096] = {0};
-        memcpy(value, pValue, valueLen);
+        // char key[256] = {0}; // Initialized to 0s to ensure it's null-terminated
+        // memcpy(key, pKey, tmpHeader.key_length);
+        // char value[4096] = {0};
+        // memcpy(value, pValue, valueLen);
+        // 5. Use strndup to copy the key and value instead of pointing to the stack-allocated buffer
+        char *key = strndup(pKey, tmpHeader.key_length);
+        char *value = strndup(pValue, valueLen);
+
 
         // Print
         printf("Magic: 0x%02x\n", tmpHeader.magic);
@@ -152,7 +158,7 @@ void *routine() {
                 pthread_mutex_unlock(&mutex);
             }
         }
-        else if (tmpHeader.opcode == CMD_ADD || tmpHeader.opcode == CMD_SET) {
+        else if (tmpHeader.opcode == CMD_ADD) {
             pthread_mutex_lock(&mutex);
             int isFound = 0; // Represents false
             // Search table for match; iterate over the list
@@ -205,6 +211,39 @@ void *routine() {
                 pthread_mutex_unlock(&mutex);
             }
         }
+        else if (tmpHeader.opcode == CMD_SET) {
+            pthread_mutex_lock(&mutex);
+            Entry *current = table;
+            int isFound = 0;
+
+            while (current != NULL) {
+                if (keyHash == current->hashKey && strcmp(current->key, key) == 0) {
+                    isFound = 1;
+                    free(current->value);
+                    current->value = strdup(value);
+                    break;
+                }
+                current = current->pNext;
+            }
+
+            if (!isFound) {
+                Entry *newEntry = malloc(sizeof(Entry));
+                newEntry->hashKey = keyHash;
+                newEntry->key = key;
+                newEntry->value = value;
+                newEntry->pNext = table;
+                table = newEntry;
+            }
+
+            res.magic = RES_MAGIC;
+            res.opcode = CMD_SET;
+            res.key_length = htons(0);
+            res.extras_length = 0;
+            res.vbucket_id = htons(RES_OK);
+            res.total_body_length = htonl(0);
+            res.cas = htonl(0);
+            pthread_mutex_unlock(&mutex);
+        }
         else if (tmpHeader.opcode == CMD_OUTPUT) {
             pthread_mutex_lock(&mutex);
             struct timespec ts;
@@ -245,6 +284,9 @@ void *routine() {
             perror("Send()");
             exit(7);
         }
+
+        free(key);
+        free(value);
 
         pthread_mutex_unlock(&mutex);
         sleep(1); // Hack so the OS reclaims the port sooner
@@ -291,12 +333,13 @@ int main (int argc, char **argv) {
     pthread_mutex_init(&mutex, NULL);
 
     for (int i = 0; i < numThreads; i++) {
-        if (pthread_create(&threads[i], NULL, &routine, NULL)) {
+        if (pthread_create(&threads[i], NULL, &workerThread, NULL)) {
             perror("Failed to create a thread.\n");
             return 1;
         }
         printf("Thread %d has started.\n", i);
     }
+
 
     for (int i = 0 ; i < numThreads; i++) {
         if (pthread_join(threads[i], NULL) != 0) {
@@ -306,7 +349,16 @@ int main (int argc, char **argv) {
     }
 
     pthread_mutex_destroy(&mutex);
-    free(table);
+
+    // Free table
+    Entry *current = table;
+    while (current != NULL) {
+        Entry *next = current->pNext;
+        free(current->key);
+        free(current->value);
+        free(current);
+        current = next;
+    }
 
     close(origSocket);
     sleep(1);
