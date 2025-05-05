@@ -1,5 +1,3 @@
-// https://www.ibm.com/docs/en/zos/2.4.0?topic=programs-c-socket-tcp-server
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,233 +8,308 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include "mcached.h"
 #include <netdb.h>
 #include <fcntl.h>
 
 #define MSG_SIZE 256
 
+int numTableEntries;
+int origSocket; // Socket for accepting connections
 pthread_mutex_t mutex;
 
-const int NUM_ENTRIES = 10; // The number of entries in the hash table
-unsigned short port;       /* port server binds to                */
-int orig_socket;                     /* socket for accepting connections    */
-struct sockaddr_in server_addr; /* server address information          */
-
+// struct for entries of the table
 typedef struct Entry {
-  char *key;
-  uint16_t keyLength;
-  char *value;
-  uint32_t valueLength;
-  unsigned long hash;
-  pthread_mutex_t lock;
-  struct Entry *pNext; // Pointer to next entry
+    char *key;
+    unsigned long hashKey;
+    char *value;
+    struct Entry *pNext;
 } Entry;
 
-Entry *table; // Dynamic array of structs
+Entry *table = NULL; // Create a table to hold key-value pairs as a LL
 
-// Modified DJB2 hash function from https://gist.github.com/MohamedTaha98/ccdf734f13299efb73ff0b12f7ce429f
-unsigned long hash(char *str, size_t c) {
-  unsigned long hash = 5381;
-  while ((c = *str++))
-      hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
-  return hash % NUM_ENTRIES;
+// DJB2 hash function from https://gist.github.com/MohamedTaha98/ccdf734f13299efb73ff0b12f7ce429f
+unsigned long hash(char *str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    return hash % numTableEntries;
 }
 
+void get_timestamp(struct timespec *ts) {
+    if (clock_gettime(CLOCK_REALTIME, ts) == -1) {
+        perror("clock_gettime");
+        exit(1);
+    }
+}
 
 void *routine() {
-  char buf[MSG_SIZE];              /* buffer for sending & receiving data */
-  struct sockaddr_in client_addr; /* client address information          */
-  int new_socket;                    /* socket connected to client          */
-  int namelen;               /* length of client name               */
-  int sleep_time;
-  int keep_going;            /* flag to keep the server accepting connections from clients */ 
-  
+    // Loop to keep server connecting to clients
+    int flagConnect = 1; // Set to 0 to quit
 
-  // While loop to keep the server connecting to clients
-  keep_going = 1;   // Flag I could change to zero to exit the server 
-  while (keep_going) { 
-    // Accept a connection
-    namelen = sizeof(client_addr);
-    if ((new_socket = accept(orig_socket, (struct sockaddr *)&client_addr, &namelen)) == -1) {
-      perror("Accept()");
-      exit(5);
-    }
+    while (flagConnect) {
+        int lengthClientName;
+        struct sockaddr_in client_addr; // Client address information
+        int newSocket; // Socket connected to client
+        char buf[MSG_SIZE]; // Buffer for sending and receiving data
 
-    // Receive the message on the newly connected socket.
-    if (recv(new_socket, buf, sizeof(buf), 0) == -1) {
-      perror("Recv()");
-      exit(6);
-    }
-
-    printf("Server got message: %s \n", buf);
-  
-    // Send the message back to the client.
-    sleep_time = 1;
-    printf("the server is on a lunch break for %d seconds \n",sleep_time); 
-    sleep(sleep_time);
-
-    // Put buffer content into the given struct from mcached.h
-    memcache_req_header_t header;
-    header.magic = buf[0];
-    header.opcode = buf[1];
-    header.key_length = (uint16_t)((buf[2] << 8) | buf[3]);
-    header.extras_length = buf[4];
-    header.vbucket_id = (uint16_t)((buf[6] << 8) | buf[7]);
-    header.total_body_length = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | (uint32_t)buf[11];
-
-    // Get key and body
-    Entry entry;
-    entry.keyLength = header.key_length;
-    entry.valueLength = header.total_body_length;
-
-    // Now read the rest of the body (header.total_body_length bytes)
-    char body_buf[header.total_body_length];
-    read(new_socket, body_buf, header.total_body_length);
-
-    // Now extract key and value from the body buffer
-    char *key = body_buf + header.extras_length;
-    char *value = body_buf + header.extras_length + header.key_length;
-    uint32_t value_len = header.total_body_length - header.extras_length - header.key_length;
-
-    // Optional: null-terminate if it's a string
-    char key_str[256] = {0};
-    memcpy(key_str, key, header.key_length);
-    char value_str[4096] = {0};
-    memcpy(value_str, value, value_len);
-
-    // Print
-    printf("Magic: 0x%02x\n", header.magic);
-    printf("Opcode: 0x%02x\n", header.opcode);
-    printf("Key length: %u\n", header.key_length);
-    printf("Vbucket ID: %u\n", header.vbucket_id);
-    printf("Total body length: %u\n", value_len);
-    printf("KEY!: ");
-
-    entry.key = malloc(header.key_length + 1);  // +1 if you want to null-terminate
-
-    for (int i = 0; i < header.key_length; i++) {
-      entry.key[i] = (unsigned char)key[i];
-      printf("%02x", (unsigned char)entry.key[i]);
-    }
-    entry.key[header.key_length] = '\0'; // Terminate the string
-    printf("\n");
-
-    printf("VALUE!: ");
-
-    entry.value = malloc(value_len + 1);  // +1 if you want to null-terminate
-
-    for (int i = 0; i < value_len; i++) {
-      entry.value[i] = (unsigned char)value[i];
-      printf("%02x", (unsigned char)entry.value[i]);
-    }
-    entry.value[value_len] = '\0'; // Terminate the string
-    printf("\n");
-    // Calculate hash of key and store
-    unsigned long hashedKey = hash(entry.key, entry.keyLength);
-    entry.hash = hashedKey;
-
-    // ADD!
-    if (header.opcode == CMD_ADD) {
-      // Calculate hash of key
-      unsigned long hashedKey = hash(entry.key, entry.keyLength);
-      printf("Hash: %ld\n", hashedKey);
-      // Lock the hash table
-      pthread_mutex_lock(&mutex);
-      // Search the key
-      // Just to traverse the array of structs to find what we want
-      Entry *current = &table[hashedKey];
-
-      while (current != NULL) {
-        if (current->keyLength == entry.keyLength && memcmp(current->key, entry.key, entry.keyLength) == 0) {
-          // Match found (same key)
-          printf("Match found at index %lu\n", hashedKey);
-          // Send an exists response - how do I do that lol (RES_EXISTS)
-          pthread_mutex_unlock(&mutex);
-
-
-          break;
-
-          current = current->pNext;
+        // Accept a connection
+        lengthClientName = sizeof(client_addr);
+        if ((newSocket = accept(origSocket, (struct sockaddr *)&client_addr, &lengthClientName)) == -1) {
+            perror("Accept()");
+            exit(5);
         }
 
-      }
+        // Receive message on the socket, put contents in buf
+        if (recv(newSocket, buf, sizeof(buf), 0) == -1) {
+            perror("Recv()");
+            exit(6);
+        }
+        printf("Server got message: %s \n", buf);
+
+        // Put buf's contents in a temp mcached header for our use
+        memcache_req_header_t tmpHeader;
+        tmpHeader.magic = buf[0];
+        tmpHeader.opcode = buf[1];
+        tmpHeader.key_length = (uint16_t)((buf[2] << 8) | buf[3]);
+        tmpHeader.extras_length = buf[4];
+        tmpHeader.vbucket_id = (uint16_t)((buf[6] << 8) | buf[7]);
+        tmpHeader.total_body_length = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | (uint32_t)buf[11];
+        
+
+        // Get the key and value
+        // 1. Read in the rest of the body (extras, key, body)
+        char body[tmpHeader.total_body_length];
+        read(newSocket, body, tmpHeader.total_body_length);
+        // 2. Set pKey to point to the start of the key in the body (right after the extras field)
+        char *pKey = body + tmpHeader.extras_length;
+        // 3. Set pValue to point to the the start of the value in the body (right after key)
+        char *pValue = body + tmpHeader.extras_length + tmpHeader.key_length;
+        // 4. Record the number of bytes that make up the value portion of the body
+        uint32_t valueLen = tmpHeader.total_body_length - tmpHeader.extras_length - tmpHeader.key_length;
+        // 5. Create buffers to hold copies of the key and value
+        char key[256] = {0}; // Initialized to 0s to ensure it's null-terminated
+        memcpy(key, pKey, tmpHeader.key_length);
+        char value[4096] = {0};
+        memcpy(value, pValue, valueLen);
+
+        // Print
+        printf("Magic: 0x%02x\n", tmpHeader.magic);
+        printf("Opcode: 0x%02x\n", tmpHeader.opcode);
+        printf("Key length: %u\n", tmpHeader.key_length);
+        printf("Vbucket ID: %u\n", tmpHeader.vbucket_id);
+        printf("Total body length: %u\n", valueLen);
+        
+        // Calculate the key's hash
+        unsigned long keyHash = hash(key);
+        printf("Calculated the key's hash!\n");
+
+        memcache_req_header_t res = {0};
+
+        // Based on opcode, do one of the following operations...
+        if (tmpHeader.opcode == CMD_GET) {
+            pthread_mutex_lock(&mutex);
+            // Search table for match
+            int isFound = 0; // Represents false
+            // Search table for match; iterate over the list
+            Entry *current = table;
+            while (current != NULL) {
+                if (keyHash == current->hashKey) {
+                    isFound = 1; // Set to true (we found the key!)
+                }
+                current = current->pNext;
+            }
+            if (isFound == 1) {
+                // Send exists to the client
+                res.magic = RES_MAGIC;
+                res.opcode = CMD_GET;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_EXISTS);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
+
+                // Send header to socket
+                if (send(newSocket, &res, sizeof(res), 0) < 0) {
+                    perror("Send()");
+                    exit(7);
+                }
+
+                pthread_mutex_unlock(&mutex);
+            }
+            else {
+                // Send not found to the client
+                res.magic = RES_MAGIC;
+                res.opcode = CMD_GET;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_NOT_FOUND);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
+
+                pthread_mutex_unlock(&mutex);
+            }
+        }
+        else if (tmpHeader.opcode == CMD_ADD || tmpHeader.opcode == CMD_SET) {
+            pthread_mutex_lock(&mutex);
+            int isFound = 0; // Represents false
+            // Search table for match; iterate over the list
+            Entry *current = table;
+            while (current != NULL) {
+                if (keyHash == current->hashKey) {
+                    isFound = 1; // Set to true (we found the key!)
+                }
+                current = current->pNext;
+            }
+            if (isFound == 1) {
+                // Send exists to the client
+                res.magic = RES_MAGIC;
+                res.opcode = tmpHeader.opcode;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_EXISTS);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
+
+                pthread_mutex_unlock(&mutex);
+            }
+            else {
+                // Allocate memory for a new entry and add to the table
+                Entry *newEntry = (Entry *)malloc(sizeof(Entry));
+                newEntry->hashKey = keyHash;
+                newEntry->key = key;
+                newEntry->value = value;
+                newEntry->pNext = NULL;
+                // If table is empty, the new entry becomes the head
+                if (table == NULL) {
+                    table = newEntry;
+                }
+                else {
+                    Entry *last = table;
+                    while (last->pNext != NULL) {
+                        last = last->pNext;
+                    }
+                    last->pNext = newEntry;
+                }
+                // Send success response to client
+                res.magic = RES_MAGIC;
+                res.opcode = tmpHeader.opcode;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_OK);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
+
+                pthread_mutex_unlock(&mutex);
+            }
+        }
+        else if (tmpHeader.opcode == CMD_OUTPUT) {
+            pthread_mutex_lock(&mutex);
+            struct timespec ts;
+            get_timestamp(&ts);
+            printf("%lx:%lx:", (unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec);
+            Entry *current = table;
+            while (current != NULL) {
+                // Print the key and value in hexadecimal
+                for (int i = 0; current->key[i] != '\0'; i++) {
+                    printf("%02x", (unsigned char)current->key[i]);
+                }
+                printf(":");
+                for (int i = 0; current->value[i] != '\0'; i++) {
+                    printf("%02x", (unsigned char)current->value[i]);
+                }
+                printf("\n");
+
+                current = current->pNext;            
+            }
+            pthread_mutex_unlock(&mutex);
+        }
+        else {
+            pthread_mutex_lock(&mutex);
+            // Send error
+            res.magic = RES_MAGIC;
+            res.opcode = res.opcode;
+            res.key_length = htons(0);
+            res.extras_length = 0;
+            res.vbucket_id = htons(RES_ERROR);
+            res.total_body_length = htonl(0);
+            res.cas = htonl(0);
+
+            pthread_mutex_unlock(&mutex);
+        }
+
+        // Send header to socket
+        if (send(newSocket, &res, sizeof(res), 0) < 0) {
+            perror("Send()");
+            exit(7);
+        }
+
+        pthread_mutex_unlock(&mutex);
+        sleep(1); // Hack so the OS reclaims the port sooner
+        close(newSocket);
     }
-  
-    if (send(new_socket, buf, sizeof(buf), 0) < 0) {
-      perror("Send()");
-      exit(7);
-    }
-
-    /* hack so the OS reclaims the port sooner 
-    Make the client close the socket first or the socket ends up in the TIME_WAIT state trying to close 
-    See: https://hea-www.harvard.edu/~fine/Tech/addrinuse.html
-    */
-    sleep(1);    
-    close(new_socket);
-  }
-  
-  close(orig_socket);
-
-  sleep(1);
-  printf("Server ended successfully\n");
-  exit(0);
-
 }
 
-int main(int argc, char **argv) {
-
-  // Get command-line arguments for server port and number of worker threads
-  if (argc != 3) {
-    fprintf(stderr, "Usage: %s port threads\n", argv[0]);
-    exit(1);
-  }
-
-  port = (unsigned short) atoi(argv[1]);
-  int numThreads = atoi(argv[2]);
-
-  // Initialize the dynamic array of structs
-  table = malloc(sizeof(Entry) * numThreads);
-
-  // Create server socket and bind to specified port
-  if ((orig_socket = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-    perror("Socket()");
-    exit(2);
-  }
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_port   = htons(port);
-  server_addr.sin_addr.s_addr = INADDR_ANY;  
-
-  if (bind(orig_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    perror("Bind()");
-    exit(3);
-  }
-
-  // Listen for connections. Specify the backlog as 1.
-  if (listen(orig_socket, 1) != 0) {
-    perror("Listen()");
-    exit(4);
-  }
-
-  // Create pthreads
-  pthread_t threads[numThreads];
-  pthread_mutex_init(&mutex, NULL);
-  for (int i = 0; i < numThreads; i++) {
-    if (pthread_create(&threads[i], NULL, &routine, NULL)) {
-      perror("Failed to create a thread.\n");
-      return 1;
+int main (int argc, char **argv) {
+    // Get server port and number of worker threads
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s port threads\n", argv[0]);
+        exit(1);
     }
-    printf("Thread %d has started.\n", i);
-  }
-  for (int i = 0; i < numThreads; i++) {
-    if (pthread_join(threads[i], NULL) != 0) {
-      return 2;
+    unsigned short port = (unsigned short)atoi(argv[1]);
+    int numThreads = atoi(argv[2]);
+    numTableEntries = numThreads; // Number of entries in hash table is the number of threads
+
+    // Create server socket
+    if ((origSocket = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("Socket()");
+        exit(2);
     }
-    printf("Thread %d has finished execution.\n", i);
-  }
 
-  pthread_mutex_destroy(&mutex);
+    // Assign IP, port
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    server_addr.sin_addr.s_addr = INADDR_ANY;
 
-  free(table);
-  exit(0);
+    // Bind to port
+    if (bind(origSocket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind()");
+        exit(3);
+    }
+
+    // Listen for connections; backlog is specified as 1
+    if (listen(origSocket, 1) != 0) {
+        perror("Listen()");
+        exit(4);
+    }
+
+    // Create threads
+    pthread_t threads[numThreads];
+    pthread_mutex_init(&mutex, NULL);
+
+    for (int i = 0; i < numThreads; i++) {
+        if (pthread_create(&threads[i], NULL, &routine, NULL)) {
+            perror("Failed to create a thread.\n");
+            return 1;
+        }
+        printf("Thread %d has started.\n", i);
+    }
+
+    for (int i = 0 ; i < numThreads; i++) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            return 2;
+        }
+        printf("Thread %d has finished execution.\n", i);
+    }
+
+    pthread_mutex_destroy(&mutex);
+    free(table);
+
+    close(origSocket);
+    sleep(1);
+    printf("Server ended successfully\n");
+    return 0;    
 }
