@@ -12,6 +12,7 @@
 #include "mcached.h"
 #include <netdb.h>
 #include <fcntl.h>
+#include <stdint.h>
 
 #define MSG_SIZE 256
 
@@ -20,10 +21,11 @@ int origSocket; // Socket for accepting connections (i.e. the fd)
 
 // struct for entries of the table
 typedef struct Entry {
-    char *key;
+    uint16_t *key;
     unsigned long hashKey;
-    char *value;
+    uint32_t *value;
     struct Entry *pNext;
+    uint32_t totalBodyLength;
     pthread_mutex_t lock;
 } Entry;
 
@@ -46,309 +48,364 @@ void get_timestamp(struct timespec *ts) {
 }
 
 void handle_client(int client_fd) {
-    char buf[sizeof(memcache_req_header_t)]; // Buffer for header data
+    while (1) {
+        char buf[sizeof(memcache_req_header_t)]; // Buffer for header data
 
-    // Receive message on the socket, put contents in buf
-    if (recv(client_fd, buf, sizeof(memcache_req_header_t), MSG_WAITALL) == -1) {
-        perror("Recv()");
-        exit(6);
-    }
-    printf("Server got message: %s \n", buf);
+        // Receive message on the socket, put contents in buf
+        if (recv(client_fd, buf, sizeof(memcache_req_header_t), MSG_WAITALL) == -1) {
+            perror("Recv()");
+            close(client_fd);
+            return;
+        }
 
-    // Put buf's contents in a temp mcached header for our use
-    memcache_req_header_t tmpHeader;
-    tmpHeader.magic = buf[0];
-    tmpHeader.opcode = buf[1];
-    tmpHeader.key_length = (uint16_t)((buf[2] << 8) | buf[3]);
-    tmpHeader.extras_length = buf[4];
-    tmpHeader.vbucket_id = (uint16_t)((buf[6] << 8) | buf[7]);
-    tmpHeader.total_body_length = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | (uint32_t)buf[11];
-    
-    // Get the key and value
-    // 1. Read in the rest of the body (extras, key, body)
-    char body[tmpHeader.total_body_length];
-    // read(newSocket, body, tmpHeader.total_body_length);
-    if (recv(client_fd, body, tmpHeader.total_body_length, MSG_WAITALL) != tmpHeader.total_body_length) {
-        perror("recv body!!!");
-        close(client_fd);
-        exit(7);
-    }
-    printf("Server got message (for key and body): %s \n", body);
-    // 2. Set pKey to point to the start of the key in the body (right after the extras field)
-    char *pKey = body + tmpHeader.extras_length;
-    // 3. Set pValue to point to the the start of the value in the body (right after key)
-    char *pValue = body + tmpHeader.extras_length + tmpHeader.key_length;
-    // 4. Record the number of bytes that make up the value portion of the body
-    uint32_t valueLen = tmpHeader.total_body_length - tmpHeader.extras_length - tmpHeader.key_length;
-    // 5. Create buffers to hold copies of the key and value
-    // char key[256] = {0}; // Initialized to 0s to ensure it's null-terminated
-    // memcpy(key, pKey, tmpHeader.key_length);
-    // char value[4096] = {0};
-    // memcpy(value, pValue, valueLen);
-    // 5. Use strndup to copy the key and value instead of pointing to the stack-allocated buffer
-    char *key = strndup(pKey, tmpHeader.key_length);
-    char *value = strndup(pValue, valueLen);
+        // Put buf's contents in a temp mcached header for our use
+        memcache_req_header_t tmpHeader;
+        tmpHeader.magic = buf[0];
+        tmpHeader.opcode = buf[1];
+        tmpHeader.key_length = (uint16_t)((buf[2] << 8) | buf[3]);
+        tmpHeader.extras_length = buf[4];
+        tmpHeader.vbucket_id = (uint16_t)((buf[6] << 8) | buf[7]);
+        tmpHeader.total_body_length = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | (uint32_t)buf[11];
+        
+        // Get the key and value
+        // total_body_length includes the extras, key and value (body)
+        // 1. Read in the rest of the body (extras, key, body)
+        char *body = malloc(tmpHeader.total_body_length);
+        if (recv(client_fd, body, tmpHeader.total_body_length, MSG_WAITALL) != tmpHeader.total_body_length) {
+            perror("recv body!!!");
+            close(client_fd);
+            return;
+        }
+        // 2. Set pKey to point to the start of the key in the body (right after the extras field)
+        char *pKey = body;
+        // 3. Set pValue to point to the the start of the value in the body (right after key)
+        char *pValue = body + tmpHeader.key_length;
+        // 4. Record the number of bytes that make up the value portion of the body
+        uint32_t valueLen = tmpHeader.total_body_length - tmpHeader.key_length;
+        // 5. Use strndup to copy the key and value instead of pointing to the stack-allocated buffer
+        char *key = strndup(pKey, tmpHeader.key_length);
+        char *value = strndup(pValue, valueLen);
 
+        // Print
+        printf("Magic: 0x%02x\n", tmpHeader.magic);
+        printf("Opcode: 0x%02x\n", tmpHeader.opcode);
+        printf("Key length: %u\n", tmpHeader.key_length);
+        printf("Vbucket ID: %u\n", tmpHeader.vbucket_id);
+        printf("Total body length: %u\n", valueLen);
+        
+        // Calculate the key's hash
+        unsigned long keyHash = hash(key);
+        printf("Calculated the key's hash!\n");
+        // Print the fucking hashes (collisions?)
+        printf("Key: %s | Hash: %lu\n\n", key, keyHash);
 
-    // Print
-    printf("Magic: 0x%02x\n", tmpHeader.magic);
-    printf("Opcode: 0x%02x\n", tmpHeader.opcode);
-    printf("Key length: %u\n", tmpHeader.key_length);
-    printf("Vbucket ID: %u\n", tmpHeader.vbucket_id);
-    printf("Total body length: %u\n", valueLen);
-    
-    // Calculate the key's hash
-    unsigned long keyHash = hash(key);
-    printf("Calculated the key's hash!\n");
-    // Print the fucking hashes (collisions?)
-    printf("Key: %s | Hash: %lu\n\n", key, keyHash);
+        // Based on opcode, do one of the following operations...
+        if (tmpHeader.opcode == CMD_GET) {
+            memcache_req_header_t res = {0};
+            // Search table for match
+            int isFound = 0; // Represents false
+            // Search table for match; iterate over the list
+            Entry *current = table;
+            Entry *target = NULL;
 
-    memcache_req_header_t res = {0};
-
-    // Based on opcode, do one of the following operations...
-    if (tmpHeader.opcode == CMD_GET) {
-        // Search table for match
-        int isFound = 0; // Represents false
-        // Search table for match; iterate over the list
-        Entry *current = table;
-        Entry *target = NULL;
-
-        while (current != NULL) {
-            if (keyHash == current->hashKey && strcmp(key, current->key) == 0) {
-                pthread_mutex_lock(&current->lock);
-                isFound = 1; // Set to true (we found the key!)
-                target = current;
-                break;
+            while (current != NULL) {
+                if (keyHash == current->hashKey && strcmp(key, current->key) == 0) {
+                    pthread_mutex_lock(&current->lock);
+                    isFound = 1; // Set to true (we found the key!)
+                    target = current;
+                    break;
+                }
+                current = current->pNext;
             }
-            current = current->pNext;
-        }
-        if (isFound == 1) {
-            // Send exists to the client
-            res.magic = RES_MAGIC;
-            res.opcode = CMD_GET;
-            res.key_length = htons(0);
-            res.extras_length = 0;
-            res.vbucket_id = htons(RES_EXISTS);
-            res.total_body_length = htonl(0);
-            res.cas = htonl(0);
+            if (isFound == 1) {
+                // Send exists to the client
+                res.magic = RES_MAGIC;
+                res.opcode = CMD_GET;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_OK);
+                res.total_body_length = target->totalBodyLength;
+                printf("Total body length (CMD_GET): %d\n", res.total_body_length);
+                res.cas = htonl(0);
 
-            pthread_mutex_unlock(&target->lock);
-        }
-        else {
-            // Send not found to the client
-            res.magic = RES_MAGIC;
-            res.opcode = CMD_GET;
-            res.key_length = htons(0);
-            res.extras_length = 0;
-            res.vbucket_id = htons(RES_NOT_FOUND);
-            res.total_body_length = htonl(0);
-            res.cas = htonl(0);
-        }
-    }
-    else if (tmpHeader.opcode == CMD_ADD) {
-        int isFound = 0; // Represents false
-        // Search table for match; iterate over the list
-        Entry *current = table;
-        while (current != NULL) {
-            if (keyHash == current->hashKey && strcmp(key, current->key) == 0) {
-                pthread_mutex_lock(&current->lock);
-                isFound = 1; // Set to true (we found the key!)
-                break;
-            }
-            current = current->pNext;
-        }
-        if (isFound == 1) {
-            // Send exists to the client
-            res.magic = RES_MAGIC;
-            res.opcode = CMD_ADD;
-            res.key_length = htons(0);
-            res.extras_length = 0;
-            res.vbucket_id = htons(RES_EXISTS);
-            res.total_body_length = htonl(0);
-            res.cas = htonl(0);
-            pthread_mutex_unlock(&current->lock);
-        }
-        else {
-            // Allocate memory for a new entry and add to the table
-            Entry *newEntry = (Entry *)malloc(sizeof(Entry));
-            newEntry->key = key;
-            newEntry->hashKey = keyHash;
-            newEntry->value = value;
-            newEntry->pNext = NULL;
-            pthread_mutex_init(&newEntry->lock, NULL);
-            pthread_mutex_lock(&newEntry->lock);
-
-            // If table is empty, the new entry becomes the head
-            if (table == NULL) {
-                table = newEntry;
+                pthread_mutex_unlock(&target->lock);
             }
             else {
-                Entry *last = table;
-                while (last->pNext != NULL) {
-                    last = last->pNext;
-                }
-                last->pNext = newEntry;
+                // Send not found to the client
+                res.magic = RES_MAGIC;
+                res.opcode = CMD_GET;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_NOT_FOUND);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
             }
-            pthread_mutex_unlock(&newEntry->lock);
+            // Send header to socket
+            if (send(client_fd, &res, sizeof(res), 0) < 0) {
+                perror("Send() help");
+                close(client_fd);
+                return;
+            }
+            // Send body to socket
+            send(client_fd, target->value, res.total_body_length, 0);
+        }
+        else if (tmpHeader.opcode == CMD_ADD) {
+            memcache_req_header_t res = {0};
+            int isFound = 0; // Represents false
+            // Search table for match; iterate over the list
+            Entry *current = table;
+            while (current != NULL) {
+                if (keyHash == current->hashKey && strcmp(key, current->key) == 0) {
+                    pthread_mutex_lock(&current->lock);
+                    isFound = 1; // Set to true (we found the key!)
+                    break;
+                }
+                current = current->pNext;
+            }
+            if (isFound == 1) {
+                // Send exists to the client
+                res.magic = RES_MAGIC;
+                res.opcode = CMD_ADD;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_EXISTS);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
+                pthread_mutex_unlock(&current->lock);
+            }
+            else {
+                // Allocate memory for a new entry and add to the table
+                Entry *newEntry = (Entry *)malloc(sizeof(Entry));
+                newEntry->key = strdup(key);
+                newEntry->hashKey = keyHash;
+                newEntry->value = strdup(value);
+                newEntry->totalBodyLength = htonl(tmpHeader.total_body_length - tmpHeader.key_length);
+                newEntry->pNext = NULL;
+                pthread_mutex_init(&newEntry->lock, NULL);
+                pthread_mutex_lock(&newEntry->lock);
 
-            // Send success response to client
+                // If table is empty, the new entry becomes the head
+                if (table == NULL) {
+                    table = newEntry;
+                }
+                else {
+                    Entry *last = table;
+                    while (last->pNext != NULL) {
+                        last = last->pNext;
+                    }
+                    last->pNext = newEntry;
+                }
+                pthread_mutex_unlock(&newEntry->lock);
+
+                // Send success response to client
+                res.magic = RES_MAGIC;
+                res.opcode = CMD_ADD;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_OK);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
+            }
+            // Send header to socket
+            if (send(client_fd, &res, sizeof(res), 0) < 0) {
+                perror("Send() help");
+                close(client_fd);
+                return;
+            }
+        }
+        else if (tmpHeader.opcode == CMD_SET) {
+            memcache_req_header_t res = {0};
+            Entry *current = table;
+            int isFound = 0;
+
+            while (current != NULL) {
+                if (keyHash == current->hashKey && strcmp(current->key, key) == 0) {
+                    isFound = 1;
+                    pthread_mutex_lock(&current->lock);
+                    free(current->value);
+                    current->value = strdup(value);
+                    pthread_mutex_unlock(&current->lock);
+                    break;
+                }
+                current = current->pNext;
+            }
+
+            if (!isFound) {
+                Entry *newEntry = malloc(sizeof(Entry));
+                pthread_mutex_init(&newEntry->lock, NULL);
+                pthread_mutex_lock(&newEntry->lock);
+
+                newEntry->hashKey = keyHash;
+                newEntry->key = strdup(key);
+                newEntry->value = strdup(value);
+                newEntry->totalBodyLength = tmpHeader.total_body_length;
+                newEntry->pNext = table;
+
+                // Insert at head of table (linked list)
+                newEntry->pNext = table;
+                table = newEntry;
+                pthread_mutex_unlock(&newEntry->lock);
+            }
+
+            memset(&res, 0, sizeof(res)); // Reset fields
             res.magic = RES_MAGIC;
-            res.opcode = CMD_ADD;
+            printf("Magic number from res: 0x%02x\n", res.magic);
+            res.opcode = CMD_SET;
             res.key_length = htons(0);
             res.extras_length = 0;
             res.vbucket_id = htons(RES_OK);
             res.total_body_length = htonl(0);
             res.cas = htonl(0);
-        }
-    }
-    else if (tmpHeader.opcode == CMD_SET) {
-        Entry *current = table;
-        int isFound = 0;
 
-        while (current != NULL) {
-            if (keyHash == current->hashKey && strcmp(current->key, key) == 0) {
-                isFound = 1;
+            // Send header to socket
+            if (send(client_fd, &res, sizeof(res), 0) < 0) {
+                perror("Send() help");
+                close(client_fd);
+                return;
+            }
+        }
+        else if (tmpHeader.opcode == CMD_OUTPUT) {
+            memcache_req_header_t res = {0};
+            struct timespec ts;
+            get_timestamp(&ts);
+            printf("%lx:%lx:", (unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec);
+            Entry *current = table;
+            while (current != NULL) {
                 pthread_mutex_lock(&current->lock);
-                free(current->value);
-                current->value = strdup(value);
+                // Print the key and value in hexadecimal
+                for (int i = 0; current->key[i] != '\0'; i++) {
+                    printf("%02x", (unsigned char)current->key[i]);
+                }
+                printf(":");
+                for (int i = 0; current->value[i] != '\0'; i++) {
+                    printf("%02x", (unsigned char)current->value[i]);
+                }
+                printf("\n");
                 pthread_mutex_unlock(&current->lock);
-                break;
+                current = current->pNext;            
             }
-            current = current->pNext;
-        }
 
-        if (!isFound) {
-            Entry *newEntry = malloc(sizeof(Entry));
-            pthread_mutex_init(&newEntry->lock, NULL);
-            pthread_mutex_lock(&newEntry->lock);
-
-            newEntry->hashKey = keyHash;
-            newEntry->key = key;
-            current->value = strdup(value);
-            newEntry->pNext = table;
-
-            // Insert at head of table (linked list)
-            newEntry->pNext = table;
-            table = newEntry;
-            pthread_mutex_unlock(&newEntry->lock);
-        }
-
-        res.magic = RES_MAGIC;
-        res.opcode = CMD_SET;
-        res.key_length = htons(0);
-        res.extras_length = 0;
-        res.vbucket_id = htons(RES_OK);
-        res.total_body_length = htonl(0);
-        res.cas = htonl(0);
-    }
-    // else if (tmpHeader.opcode == CMD_OUTPUT) {
-    //     struct timespec ts;
-    //     get_timestamp(&ts);
-    //     printf("%lx:%lx:", (unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec);
-    //     Entry *current = table;
-    //     pthread_mutex_lock(&current->lock);
-    //     while (current != NULL) {
-    //         // Print the key and value in hexadecimal
-    //         for (int i = 0; current->key[i] != '\0'; i++) {
-    //             printf("%02x", (unsigned char)current->key[i]);
-    //         }
-    //         printf(":");
-    //         for (int i = 0; current->value[i] != '\0'; i++) {
-    //             printf("%02x", (unsigned char)current->value[i]);
-    //         }
-    //         printf("\n");
-
-    //         current = current->pNext;            
-    //     }
-    //     pthread_mutex_unlock(&current->lock);
-    // }
-    else if (tmpHeader.opcode == CMD_DELETE) {
-        int isFound = 0; // Represents false
-        // Search table for match; iterate over the list
-        Entry *current = table;
-        Entry *previous = NULL;
-        while (current != NULL) {
-            if (keyHash == current->hashKey && strcmp(key, current->key) == 0) {
-                isFound = 1; // Set to true (we found the key!)
-                pthread_mutex_lock(&current->lock);
-                break;
-            }
-            previous = current;
-            current = current->pNext;
-        }
-        if (isFound == 1) {
-            // Remove entry from LL
-            if (previous == NULL) {
-                table = current->pNext;
-            }
-            else {
-                previous->pNext = current->pNext;
-            }
-            free(current->key);
-            free(current->value);
-            pthread_mutex_unlock(&current->lock);
-            pthread_mutex_destroy(&current->lock);
-            free(current);
             // Send response to the client
             res.magic = RES_MAGIC;
-            res.opcode = CMD_DELETE;
+            res.opcode = CMD_OUTPUT;
             res.key_length = htons(0);
             res.extras_length = 0;
             res.vbucket_id = htons(RES_OK);
             res.total_body_length = htonl(0);
             res.cas = htonl(0);
+            // The body should have the printfs?
+
+            // Send header to socket
+            if (send(client_fd, &res, sizeof(res), 0) < 0) {
+                perror("Send() help");
+                close(client_fd);
+                return;
+            }
+        }
+        else if (tmpHeader.opcode == CMD_DELETE) {
+            memcache_req_header_t res = {0};
+            int isFound = 0; // Represents false
+            // Search table for match; iterate over the list
+            Entry *current = table;
+            Entry *previous = NULL;
+            while (current != NULL) {
+                if (keyHash == current->hashKey && strcmp(key, current->key) == 0) {
+                    isFound = 1; // Set to true (we found the key!)
+                    pthread_mutex_lock(&current->lock);
+                    break;
+                }
+                previous = current;
+                current = current->pNext;
+            }
+            if (isFound == 1) {
+                // Remove entry from LL
+                if (previous == NULL) {
+                    table = current->pNext;
+                }
+                else {
+                    previous->pNext = current->pNext;
+                }
+                free(current->key);
+                free(current->value);
+                pthread_mutex_unlock(&current->lock);
+                pthread_mutex_destroy(&current->lock);
+                free(current);
+                // Send response to the client
+                res.magic = RES_MAGIC;
+                res.opcode = CMD_DELETE;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_OK);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
+            }
+            else {
+                res.magic = RES_MAGIC;
+                res.opcode = CMD_DELETE;
+                res.key_length = htons(0);
+                res.extras_length = 0;
+                res.vbucket_id = htons(RES_NOT_FOUND);
+                res.total_body_length = htonl(0);
+                res.cas = htonl(0);
+            }
+            // Send header to socket
+            if (send(client_fd, &res, sizeof(res), 0) < 0) {
+                perror("Send() help");
+                close(client_fd);
+                return;
+            }
+        }
+        else if (tmpHeader.opcode == CMD_VERSION) {
+            memcache_req_header_t res = {0};
+            // Send response containing server string
+            const char *version_string = "C-Memcached 1.0";
+            size_t version_length = strlen(version_string);
+            res.magic = RES_MAGIC;
+            res.opcode = CMD_VERSION;
+            res.key_length = htons(0);
+            res.extras_length = 0; 
+            res.vbucket_id = htons(RES_OK); 
+            res.total_body_length = htonl(version_length);
+            res.cas = htonl(0);
+
+            // Send header to socket
+            if (send(client_fd, &res, sizeof(res), 0) < 0) {
+                perror("Send() help");
+                close(client_fd);
+                return;
+            }
+            // Send body to socket
+            send(client_fd, version_string, version_length, 0);
         }
         else {
+            memcache_req_header_t res = {0};
+            // Send error
             res.magic = RES_MAGIC;
-            res.opcode = CMD_DELETE;
+            res.opcode = tmpHeader.opcode;
             res.key_length = htons(0);
             res.extras_length = 0;
-            res.vbucket_id = htons(RES_NOT_FOUND);
+            res.vbucket_id = htons(RES_ERROR);
             res.total_body_length = htonl(0);
             res.cas = htonl(0);
+
+            // Send header to socket
+            if (send(client_fd, &res, sizeof(res), 0) < 0) {
+                perror("Send() help");
+                close(client_fd);
+                return;
+            }
         }
-    }
-    else if (tmpHeader.opcode == CMD_VERSION) {
-        // Send response containing server string
-        const char *version_string = "C-Memcached 1.0";
-        size_t version_length = strlen(version_string);
-        res.magic = RES_MAGIC;
-        res.opcode = CMD_VERSION;
-        res.key_length = htons(0);
-        res.extras_length = 0; 
-        res.vbucket_id = htons(RES_OK); 
-        res.total_body_length = htonl(version_length);
-        res.cas = htonl(0);
 
-        send(client_fd, version_string, version_length, 0);
+        free(key);
+        free(value);
+        free(body);
     }
-    else {
-        // Send error
-        res.magic = RES_MAGIC;
-        res.opcode = tmpHeader.opcode;
-        res.key_length = htons(0);
-        res.extras_length = 0;
-        res.vbucket_id = htons(RES_ERROR);
-        res.total_body_length = htonl(0);
-        res.cas = htonl(0);
-    }
-
-    // Send header to socket
-    if (send(client_fd, &res, sizeof(res), 0) < 0) {
-        perror("Send() help");
-        exit(7);
-    }
-
-    free(key);
-    free(value);
-
-    sleep(1); // Hack so the OS reclaims the port sooner
+    sleep(1);
     close(client_fd);
-    
 }
 
 void *workerThread(void *arg) {
-    int server_fd = *((int *)arg);
+    int server_fd = (intptr_t)arg;
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
@@ -360,8 +417,6 @@ void *workerThread(void *arg) {
 
         // Call client request handling function
         handle_client(client_fd);
-
-        close(client_fd);
     }
 }
 
@@ -403,7 +458,7 @@ int main (int argc, char **argv) {
     pthread_t threads[numThreads];
 
     for (int i = 0; i < numThreads; i++) {
-        if (pthread_create(&threads[i], NULL, &workerThread, &origSocket)) {
+        if (pthread_create(&threads[i], NULL, &workerThread, (void *)(intptr_t)origSocket)) {
             perror("Failed to create a thread.\n");
             return 1;
         }
@@ -422,10 +477,13 @@ int main (int argc, char **argv) {
     Entry *current = table;
     while (current != NULL) {
         Entry *next = current->pNext;
+        // Check if mutex is locked before unlocking
+        if (pthread_mutex_trylock(&current->lock) == 0) {
+            pthread_mutex_unlock(&current->lock);
+        }
+        pthread_mutex_destroy(&current->lock);
         free(current->key);
         free(current->value);
-        pthread_mutex_unlock(&current->lock);
-        pthread_mutex_destroy(&current->lock);
         free(current);
         current = next;
     }
@@ -435,6 +493,3 @@ int main (int argc, char **argv) {
     printf("Server ended successfully\n");
     return 0;    
 }
-
-// Next move to is to remove table lock and use only the individual locks when accessing or modifying
-// Entry only locks: lock when accessing or modifying the value
