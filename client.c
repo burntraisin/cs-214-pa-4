@@ -40,6 +40,8 @@ char* get_opcode_string(char opcode) {
         return "SET";
     case CMD_VERSION:
         return "VERSION";
+    case CMD_OUTPUT:
+        return "OUTPUT";
     default:
         return "[UNKNOWN]";
     }

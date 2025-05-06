@@ -46,10 +46,10 @@ void get_timestamp(struct timespec *ts) {
 }
 
 void handle_client(int client_fd) {
-    char buf[MSG_SIZE]; // Buffer for sending and receiving data
+    char buf[sizeof(memcache_req_header_t)]; // Buffer for header data
 
     // Receive message on the socket, put contents in buf
-    if (recv(client_fd, buf, sizeof(buf), MSG_WAITALL) == -1) {
+    if (recv(client_fd, buf, sizeof(memcache_req_header_t), MSG_WAITALL) == -1) {
         perror("Recv()");
         exit(6);
     }
@@ -64,7 +64,6 @@ void handle_client(int client_fd) {
     tmpHeader.vbucket_id = (uint16_t)((buf[6] << 8) | buf[7]);
     tmpHeader.total_body_length = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | (uint32_t)buf[11];
     
-
     // Get the key and value
     // 1. Read in the rest of the body (extras, key, body)
     char body[tmpHeader.total_body_length];
@@ -72,7 +71,9 @@ void handle_client(int client_fd) {
     if (recv(client_fd, body, tmpHeader.total_body_length, MSG_WAITALL) != tmpHeader.total_body_length) {
         perror("recv body!!!");
         close(client_fd);
-    }        
+        exit(7);
+    }
+    printf("Server got message (for key and body): %s \n", body);
     // 2. Set pKey to point to the start of the key in the body (right after the extras field)
     char *pKey = body + tmpHeader.extras_length;
     // 3. Set pValue to point to the the start of the value in the body (right after key)
@@ -100,7 +101,7 @@ void handle_client(int client_fd) {
     unsigned long keyHash = hash(key);
     printf("Calculated the key's hash!\n");
     // Print the fucking hashes (collisions?)
-    printf("Key: %s, Hash: %lu\n\n", key, keyHash);
+    printf("Key: %s | Hash: %lu\n\n", key, keyHash);
 
     memcache_req_header_t res = {0};
 
@@ -240,27 +241,27 @@ void handle_client(int client_fd) {
         res.total_body_length = htonl(0);
         res.cas = htonl(0);
     }
-    else if (tmpHeader.opcode == CMD_OUTPUT) {
-        struct timespec ts;
-        get_timestamp(&ts);
-        printf("%lx:%lx:", (unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec);
-        Entry *current = table;
-        pthread_mutex_lock(&current->lock);
-        while (current != NULL) {
-            // Print the key and value in hexadecimal
-            for (int i = 0; current->key[i] != '\0'; i++) {
-                printf("%02x", (unsigned char)current->key[i]);
-            }
-            printf(":");
-            for (int i = 0; current->value[i] != '\0'; i++) {
-                printf("%02x", (unsigned char)current->value[i]);
-            }
-            printf("\n");
+    // else if (tmpHeader.opcode == CMD_OUTPUT) {
+    //     struct timespec ts;
+    //     get_timestamp(&ts);
+    //     printf("%lx:%lx:", (unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec);
+    //     Entry *current = table;
+    //     pthread_mutex_lock(&current->lock);
+    //     while (current != NULL) {
+    //         // Print the key and value in hexadecimal
+    //         for (int i = 0; current->key[i] != '\0'; i++) {
+    //             printf("%02x", (unsigned char)current->key[i]);
+    //         }
+    //         printf(":");
+    //         for (int i = 0; current->value[i] != '\0'; i++) {
+    //             printf("%02x", (unsigned char)current->value[i]);
+    //         }
+    //         printf("\n");
 
-            current = current->pNext;            
-        }
-        pthread_mutex_unlock(&current->lock);
-    }
+    //         current = current->pNext;            
+    //     }
+    //     pthread_mutex_unlock(&current->lock);
+    // }
     else if (tmpHeader.opcode == CMD_DELETE) {
         int isFound = 0; // Represents false
         // Search table for match; iterate over the list
