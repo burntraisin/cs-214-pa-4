@@ -17,7 +17,6 @@
 
 int numTableEntries;
 int origSocket; // Socket for accepting connections (i.e. the fd)
-pthread_mutex_t table_lock;
 
 // struct for entries of the table
 typedef struct Entry {
@@ -71,7 +70,7 @@ void handle_client(int client_fd) {
     char body[tmpHeader.total_body_length];
     // read(newSocket, body, tmpHeader.total_body_length);
     if (recv(client_fd, body, tmpHeader.total_body_length, MSG_WAITALL) != tmpHeader.total_body_length) {
-        perror("recv body");
+        perror("recv body!!!");
         close(client_fd);
     }        
     // 2. Set pKey to point to the start of the key in the body (right after the extras field)
@@ -143,11 +142,9 @@ void handle_client(int client_fd) {
             res.vbucket_id = htons(RES_NOT_FOUND);
             res.total_body_length = htonl(0);
             res.cas = htonl(0);
-
         }
     }
     else if (tmpHeader.opcode == CMD_ADD) {
-        pthread_mutex_lock(&table_lock);
         int isFound = 0; // Represents false
         // Search table for match; iterate over the list
         Entry *current = table;
@@ -155,7 +152,6 @@ void handle_client(int client_fd) {
             if (keyHash == current->hashKey && strcmp(key, current->key) == 0) {
                 pthread_mutex_lock(&current->lock);
                 isFound = 1; // Set to true (we found the key!)
-                pthread_mutex_unlock(&current->lock);
                 break;
             }
             current = current->pNext;
@@ -169,6 +165,7 @@ void handle_client(int client_fd) {
             res.vbucket_id = htons(RES_EXISTS);
             res.total_body_length = htonl(0);
             res.cas = htonl(0);
+            pthread_mutex_unlock(&current->lock);
         }
         else {
             // Allocate memory for a new entry and add to the table
@@ -221,12 +218,13 @@ void handle_client(int client_fd) {
 
         if (!isFound) {
             Entry *newEntry = malloc(sizeof(Entry));
+            pthread_mutex_init(&newEntry->lock, NULL);
+            pthread_mutex_lock(&newEntry->lock);
+
             newEntry->hashKey = keyHash;
             newEntry->key = key;
             current->value = strdup(value);
             newEntry->pNext = table;
-            pthread_mutex_init(&newEntry->lock, NULL);
-            pthread_mutex_lock(&newEntry->lock);
 
             // Insert at head of table (linked list)
             newEntry->pNext = table;
@@ -243,11 +241,11 @@ void handle_client(int client_fd) {
         res.cas = htonl(0);
     }
     else if (tmpHeader.opcode == CMD_OUTPUT) {
-        pthread_mutex_lock(&table_lock);
         struct timespec ts;
         get_timestamp(&ts);
         printf("%lx:%lx:", (unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec);
         Entry *current = table;
+        pthread_mutex_lock(&current->lock);
         while (current != NULL) {
             // Print the key and value in hexadecimal
             for (int i = 0; current->key[i] != '\0'; i++) {
@@ -261,10 +259,9 @@ void handle_client(int client_fd) {
 
             current = current->pNext;            
         }
-        pthread_mutex_unlock(&table_lock);
+        pthread_mutex_unlock(&current->lock);
     }
     else if (tmpHeader.opcode == CMD_DELETE) {
-        pthread_mutex_lock(&table_lock);
         int isFound = 0; // Represents false
         // Search table for match; iterate over the list
         Entry *current = table;
@@ -309,11 +306,9 @@ void handle_client(int client_fd) {
             res.total_body_length = htonl(0);
             res.cas = htonl(0);
         }
-        pthread_mutex_unlock(&table_lock);
     }
     else if (tmpHeader.opcode == CMD_VERSION) {
         // Send response containing server string
-        pthread_mutex_lock(&table_lock);
         const char *version_string = "C-Memcached 1.0";
         size_t version_length = strlen(version_string);
         res.magic = RES_MAGIC;
@@ -324,12 +319,9 @@ void handle_client(int client_fd) {
         res.total_body_length = htonl(version_length);
         res.cas = htonl(0);
 
-        pthread_mutex_unlock(&table_lock);
-
         send(client_fd, version_string, version_length, 0);
     }
     else {
-        pthread_mutex_lock(&table_lock);
         // Send error
         res.magic = RES_MAGIC;
         res.opcode = tmpHeader.opcode;
@@ -338,13 +330,11 @@ void handle_client(int client_fd) {
         res.vbucket_id = htons(RES_ERROR);
         res.total_body_length = htonl(0);
         res.cas = htonl(0);
-
-        pthread_mutex_unlock(&table_lock);
     }
 
     // Send header to socket
     if (send(client_fd, &res, sizeof(res), 0) < 0) {
-        perror("Send()");
+        perror("Send() help");
         exit(7);
     }
 
@@ -410,7 +400,6 @@ int main (int argc, char **argv) {
 
     // Create threads
     pthread_t threads[numThreads];
-    pthread_mutex_init(&table_lock, NULL);
 
     for (int i = 0; i < numThreads; i++) {
         if (pthread_create(&threads[i], NULL, &workerThread, &origSocket)) {
@@ -440,7 +429,6 @@ int main (int argc, char **argv) {
         current = next;
     }
 
-    pthread_mutex_destroy(&table_lock);
     close(origSocket);
     sleep(1);
     printf("Server ended successfully\n");
@@ -448,3 +436,4 @@ int main (int argc, char **argv) {
 }
 
 // Next move to is to remove table lock and use only the individual locks when accessing or modifying
+// Entry only locks: lock when accessing or modifying the value
