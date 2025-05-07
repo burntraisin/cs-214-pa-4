@@ -1,2 +1,2 @@
 default:
-	gcc mcached.c -o ./mcached -lpthread -lrt
+	gcc -g mcached.c -o ./mcached -lpthread -lrt

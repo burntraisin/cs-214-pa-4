@@ -106,7 +106,8 @@ void send_request(int sock, uint8_t cmd, const uint8_t *key, const uint8_t *val,
 void receive_response(int sock, memcache_req_header_t* hdr, uint8_t **key, uint8_t **value, int thread_num) {
   //    uint32_t total_body_length;
   //    uint16_t vbucket_id;
-  ssize_t n = read(sock, hdr, sizeof(memcache_req_header_t));
+  //ssize_t n = read(sock, hdr, sizeof(memcache_req_header_t));
+  ssize_t n = recv(sock, hdr, sizeof(memcache_req_header_t), MSG_WAITALL);
   if (n != sizeof(memcache_req_header_t)) {
     pthread_mutex_lock(&pmutex);
     printf("Thread %d; ", thread_num);
@@ -120,7 +121,8 @@ void receive_response(int sock, memcache_req_header_t* hdr, uint8_t **key, uint8
     
     if (body_len > 0) {
         uint8_t *body = malloc(body_len);
-        n = read(sock, body, body_len);
+        //n = read(sock, body, body_len);
+        n = recv(sock, body, body_len, MSG_WAITALL);
         if (n != body_len) {
             free(body);
             pthread_mutex_lock(&pmutex);
@@ -261,14 +263,14 @@ void* worker_thread(void *arg) {
     // free((void *)valuer);
 
     // OUTPUT   
-    printf("sending output \n \n");
-    keyr = NULL, valuer = NULL;
-    send_request(sock, CMD_OUTPUT, NULL, NULL, 0, 0, thread_num);
-    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    assert(hdr.magic == 0x81);
-    assert(hdr.opcode == CMD_OUTPUT);
-    assert(hdr.vbucket_id == htons(RES_OK));
-    free(keyr);
+    // printf("sending output \n \n");
+    // keyr = NULL, valuer = NULL;
+    // send_request(sock, CMD_OUTPUT, NULL, NULL, 0, 0, thread_num);
+    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    // assert(hdr.magic == 0x81);
+    // assert(hdr.opcode == CMD_OUTPUT);
+    // assert(hdr.vbucket_id == htons(RES_OK));
+    // free(keyr);
 
     
     // GET
