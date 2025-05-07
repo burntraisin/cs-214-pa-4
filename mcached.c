@@ -18,6 +18,7 @@
 
 int numTableEntries;
 int origSocket; // Socket for accepting connections (i.e. the fd)
+pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
 
 // struct for entries of the table
 typedef struct Entry {
@@ -210,6 +211,7 @@ void handle_client(int client_fd) {
             }
             if (isFound == 1) {
                 printf("Is found bro!!!!!\n\n");
+                printf("Sending GET response: keylen=%u valuelen=%u total_body_length=%u\n", target->key_length, target->value_length, target->key_length + target->value_length);
                 send_response(client_fd, CMD_GET, RES_OK, target->key_length, target->value_length, target->key, target->value);
 
             }
@@ -249,19 +251,12 @@ void handle_client(int client_fd) {
 
                 newEntry->pNext = NULL;
                 pthread_mutex_init(&newEntry->lock, NULL);
-                pthread_mutex_lock(&newEntry->lock);
 
-                // If table is empty, the new entry becomes the head
-                if (table == NULL) {
-                    table = newEntry;
-                }
-                else {
-                    Entry *last = table;
-                    while (last->pNext != NULL) {
-                        last = last->pNext;
-                    }
-                    last->pNext = newEntry;
-                }
+                // Insert at the head
+                pthread_mutex_lock(&table_lock);
+                newEntry->pNext = table;
+                table = newEntry;
+
                 pthread_mutex_unlock(&newEntry->lock);
                 send_response(client_fd, CMD_ADD, RES_OK, 0, 0, key, value);
             }
@@ -366,6 +361,7 @@ void handle_client(int client_fd) {
                 current = current->pNext;
             }
             if (isFound == 1) {
+                pthread_mutex_lock(&table_lock);
                 // Remove entry from LL
                 if (previous == NULL) {
                     table = current->pNext;
@@ -378,6 +374,7 @@ void handle_client(int client_fd) {
                 pthread_mutex_unlock(&current->lock);
                 pthread_mutex_destroy(&current->lock);
                 free(current);
+                pthread_mutex_unlock(&table_lock);
 
                 send_response(client_fd, CMD_DELETE, RES_OK, 0, 0, NULL, NULL);
             }
@@ -486,6 +483,9 @@ int main (int argc, char **argv) {
         free(current);
         current = next;
     }
+
+    // Free table lock
+    pthread_mutex_destroy(&table_lock);
 
     close(origSocket);
     sleep(1);
