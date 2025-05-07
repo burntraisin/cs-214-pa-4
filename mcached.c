@@ -71,26 +71,26 @@ void send_response(int client_fd, uint8_t opcode, uint16_t vbucket_id, uint16_t 
         return;
     }
 
-    if (opcode == CMD_VERSION) {
-        const char *version_string = "C-Memcached 1.0";
-        size_t version_length = strlen(version_string);
-        send(client_fd, version_string, version_length, 0);
-        return;
-    }
+    // if (opcode == CMD_VERSION) {
+    //     const char *version_string = "C-Memcached 1.0";
+    //     size_t version_length = strlen(version_string);
+    //     send(client_fd, version_string, version_length, 0);
+    //     return;
+    // }
 
     // Send key and value if present
-    if (key_length > 0) {
-        printf("Key: ");
-        for (int i = 0; i < key_length; i++) {
-            printf("%02x ", key[i]);
-        }
-        printf("\n");
+    // if (key_length > 0) {
+    //     printf("Key: ");
+    //     for (int i = 0; i < key_length; i++) {
+    //         printf("%02x ", key[i]);
+    //     }
+    //     printf("\n");
 
-        if (send(client_fd, key, key_length, 0) < 0) {
-            perror("Send key failed");
-            return;
-        }
-    }
+    //     if (send(client_fd, key, key_length, 0) < 0) {
+    //         perror("Send key failed");
+    //         return;
+    //     }
+    // }
     if (value_len > 0) {
         printf("Value: ");
         for (int i = 0; i < value_len; i++) {
@@ -111,12 +111,22 @@ void handle_client(int client_fd) {
         memset(buf, 0, sizeof(buf));
 
         // Receive message on the socket, put contents in buf
-        if (recv(client_fd, buf, 24, MSG_WAITALL) == -1) {
-            perror("Recv()?!");
+        // if (recv(client_fd, buf, 24, MSG_WAITALL) == -1) {
+        //     perror("Recv()?!");
+        //     fprintf(stderr, "errno = %d\n", errno);
+        //     // close(client_fd);
+        //     return;
+        // }
+        ssize_t n = recv(client_fd, buf, 24, MSG_WAITALL);
+        if (n == 0) {
+            fprintf(stderr, "Client closed connection.\n");
+            break; // or return
+        } else if (n < 0) {
+            perror("recv header");
             fprintf(stderr, "errno = %d\n", errno);
-            // close(client_fd);
             return;
         }
+
 
         printf("Raw header bytes:\n");
         for (int i = 0; i < sizeof(buf); ++i) {
@@ -153,11 +163,11 @@ void handle_client(int client_fd) {
         }
         
         // 2. Set pKey to point to the start of the key in the body (right after the extras field)
-        uint8_t *pKey = body;
+        uint8_t *pKey = body + tmpHeader.extras_length;
         // 3. Set pValue to point to the start of the value in the body (right after the key)
-        uint8_t *pValue = body + tmpHeader.key_length;
+        uint8_t *pValue = body + tmpHeader.extras_length + tmpHeader.key_length;
         // 4. Record the number of bytes that make up the value portion of the body
-        uint32_t valueLen = tmpHeader.total_body_length - tmpHeader.key_length;
+        uint32_t valueLen = tmpHeader.total_body_length - tmpHeader.extras_length - tmpHeader.key_length;
         uint32_t keyLen = tmpHeader.key_length;
 
         // 5. Allocate memory for key and value
@@ -212,7 +222,7 @@ void handle_client(int client_fd) {
             if (isFound == 1) {
                 printf("Is found bro!!!!!\n\n");
                 printf("Sending GET response: keylen=%u valuelen=%u total_body_length=%u\n", target->key_length, target->value_length, target->key_length + target->value_length);
-                send_response(client_fd, CMD_GET, RES_OK, target->key_length, target->value_length, target->key, target->value);
+                send_response(client_fd, CMD_GET, RES_OK, 0, target->value_length, NULL, target->value);
 
             }
             else {
@@ -257,7 +267,7 @@ void handle_client(int client_fd) {
                 newEntry->pNext = table;
                 table = newEntry;
 
-                pthread_mutex_unlock(&newEntry->lock);
+                pthread_mutex_unlock(&table_lock);
                 send_response(client_fd, CMD_ADD, RES_OK, 0, 0, key, value);
             }
         }
@@ -302,11 +312,11 @@ void handle_client(int client_fd) {
                 table = newEntry;
                 pthread_mutex_unlock(&newEntry->lock);
                 printf("Sending SET response: keylen=%u valuelen=%u total_body_length=%u\n", newEntry->key_length, newEntry->value_length, newEntry->key_length + newEntry->value_length);
-                send_response(client_fd, CMD_SET, RES_OK, newEntry->key_length, newEntry->value_length, newEntry->key, newEntry->value);
+                send_response(client_fd, CMD_SET, RES_OK, 0, 0, NULL, NULL);
             }
             else {
                 printf("Sending SET response: keylen=%u valuelen=%u total_body_length=%u\n", current->key_length, current->value_length, current->key_length + current->value_length);
-                send_response(client_fd, CMD_SET, RES_OK, current->key_length, current->value_length, current->key, current->value);
+                send_response(client_fd, CMD_SET, RES_OK, 0, 0, NULL, NULL);
             }
         }
         // else if (tmpHeader.opcode == CMD_OUTPUT) {
@@ -347,21 +357,26 @@ void handle_client(int client_fd) {
         //     }
         // }
         else if (tmpHeader.opcode == CMD_DELETE) {
+            printf("I'm here girl!\n\n");
             int isFound = 0; // Represents false
             // Search table for match; iterate over the list
             Entry *current = table;
+            
             Entry *previous = NULL;
             while (current != NULL) {
+                pthread_mutex_lock(&current->lock);
                 if (keyHash == current->hashKey && memcmp(key, current->key, current->key_length) == 0) {
                     isFound = 1; // Set to true (we found the key!)
-                    pthread_mutex_lock(&current->lock);
+                    pthread_mutex_unlock(&current->lock);
                     break;
                 }
+                pthread_mutex_unlock(&current->lock);
                 previous = current;
                 current = current->pNext;
             }
+            printf("I'm here, after searching for a match!\n\n");
             if (isFound == 1) {
-                pthread_mutex_lock(&table_lock);
+                // pthread_mutex_lock(&table_lock);
                 // Remove entry from LL
                 if (previous == NULL) {
                     table = current->pNext;
@@ -369,29 +384,28 @@ void handle_client(int client_fd) {
                 else {
                     previous->pNext = current->pNext;
                 }
+                pthread_mutex_destroy(&current->lock);
                 free(current->value);
                 free(current->key);
-                pthread_mutex_unlock(&current->lock);
-                pthread_mutex_destroy(&current->lock);
                 free(current);
-                pthread_mutex_unlock(&table_lock);
+                // pthread_mutex_unlock(&table_lock);
 
+                printf("Sending DELETE response\n\n");
                 send_response(client_fd, CMD_DELETE, RES_OK, 0, 0, NULL, NULL);
             }
             else {
+                printf("Sending DELETE response\n\n");
                 send_response(client_fd, CMD_DELETE, RES_NOT_FOUND, 0, 0, NULL, NULL);
             }
         }
         else if (tmpHeader.opcode == CMD_VERSION) {
-            // Send response containing server string
-            send_response(client_fd, CMD_SET, RES_OK, 0, 0, NULL, NULL); // The body won't send here because lengths are 0
+            send_response(client_fd, CMD_VERSION, RES_OK, 0, strlen("C-Memcached 1.0"), NULL, "C-Memcached 1.0");
             
         }
         else {
             // Send error
-            send_response(client_fd, CMD_VERSION, RES_ERROR, 0, 0, NULL, NULL); // The body won't send here because lengths are 0
+            send_response(client_fd, tmpHeader.opcode, RES_ERROR, 0, 0, NULL, NULL);
         }
-
         free(key);
         free(value);
         free(body);
@@ -444,7 +458,7 @@ int main (int argc, char **argv) {
         exit(3);
     }
 
-    // Listen for connections; backlog is specified as 1
+    // Listen for connections
     if (listen(origSocket, 128) != 0) {
         perror("Listen()");
         exit(4);

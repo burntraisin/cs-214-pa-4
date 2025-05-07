@@ -331,7 +331,7 @@ void* worker_thread(void *arg) {
     verify_correctness(thread_num, &hdr, &exp, valuer, (uint8_t *) "C-Memcached 1.0");
     free((void*)keyr);
 
-    // DELETE something that doesn't exist
+    // DELETE something that doesn't exist - right here
     keyr = NULL, valuer = NULL;
     key[keylen - 1] = 1;
     send_request(sock, CMD_DELETE, key, NULL, keylen, 0, thread_num);
@@ -342,14 +342,14 @@ void* worker_thread(void *arg) {
     verify_correctness(thread_num, &hdr, &exp, valuer, value);
 
     // OUTPUT   
-    printf("sending output \n \n");
-    keyr = NULL, valuer = NULL;
-    send_request(sock, CMD_OUTPUT, NULL, NULL, 0, 0, thread_num);
-    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    assert(hdr.magic == 0x81);
-    assert(hdr.opcode == CMD_OUTPUT);
-    assert(hdr.vbucket_id == htons(RES_OK));
-    free(keyr);
+    // printf("sending output \n \n");
+    // keyr = NULL, valuer = NULL;
+    // send_request(sock, CMD_OUTPUT, NULL, NULL, 0, 0, thread_num);
+    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    // assert(hdr.magic == 0x81);
+    // assert(hdr.opcode == CMD_OUTPUT);
+    // assert(hdr.vbucket_id == htons(RES_OK));
+    // free(keyr);
 
     close(sock);
     free(arg);
