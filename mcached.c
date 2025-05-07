@@ -22,7 +22,7 @@ int origSocket; // Socket for accepting connections (i.e. the fd)
 // struct for entries of the table
 typedef struct Entry {
     uint8_t *key;
-    unsigned long hashKey;
+    uint32_t hashKey;
     uint8_t *value;
     struct Entry *pNext;
     uint16_t key_length;
@@ -33,8 +33,8 @@ typedef struct Entry {
 Entry *table = NULL; // Create a table to hold key-value pairs as a LL
 
 // DJB2 hash function from https://gist.github.com/MohamedTaha98/ccdf734f13299efb73ff0b12f7ce429f
-unsigned long hash(uint16_t *str) {
-    unsigned long hash = 5381;
+uint32_t hash(uint8_t *str) {
+    uint32_t hash = 5381;
     int c;
     while ((c = *str++))
         hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
@@ -48,77 +48,133 @@ void get_timestamp(struct timespec *ts) {
     }
 }
 
-void send_response(int client_fd, uint8_t opcode, uint16_t vbucket_id, uint16_t key_length, uint32_t value_len, uint16_t *key, uint32_t *value) {
+void send_response(int client_fd, uint8_t opcode, uint16_t vbucket_id, uint16_t key_length, uint32_t value_len, uint8_t *key, uint8_t *value) {
     memcache_req_header_t res;
+    memset(&res, 0, sizeof(res));
+
     res.magic = RES_MAGIC;
     res.opcode = opcode;
-    res.key_length = htons(0);
+    res.key_length = htons(key_length);
     res.extras_length = 0;
     res.vbucket_id = htons(vbucket_id);
-    res.total_body_length = htonl(key_length + value_len);
-    res.cas = htonl(0);
+    res.total_body_length = htonl(value_len);
+    res.cas = 0;
+
+    printf("Sending response: magic=0x%02x, opcode=%u, total_body_length=%u\n",
+        res.magic, res.opcode, ntohl(res.total_body_length));
+ 
 
     // Send header
     if (send(client_fd, &res, sizeof(res), 0) < 0) {
         perror("Send() help");
-        close(client_fd);
         return;
     }
-    if (key_length == 0 && value_len == 0) {
-        // Do nothing
-    }
-    else {
-        // Send body (the key and value)
-        send(client_fd, key, key_length, 0);
-        send(client_fd, value, value_len, 0);
-    }
+
     if (opcode == CMD_VERSION) {
         const char *version_string = "C-Memcached 1.0";
         size_t version_length = strlen(version_string);
-        send(client_fd, version_string, version_length, 0); // Send body to socket
+        send(client_fd, version_string, version_length, 0);
+        return;
+    }
+
+    // Send key and value if present
+    if (key_length > 0) {
+        printf("Key: ");
+        for (int i = 0; i < key_length; i++) {
+            printf("%02x ", key[i]);
+        }
+        printf("\n");
+
+        if (send(client_fd, key, key_length, 0) < 0) {
+            perror("Send key failed");
+            return;
+        }
+    }
+    if (value_len > 0) {
+        printf("Value: ");
+        for (int i = 0; i < value_len; i++) {
+            printf("%02x ", value[i]);
+        }
+        printf("\n");
+
+        if (send(client_fd, value, value_len, 0) < 0) {
+            perror("Send value failed");
+            return;
+        }
     }
 }
 
 void handle_client(int client_fd) {
     while (1) {
-        char buf[sizeof(memcache_req_header_t)]; // Buffer for header data
+        char buf[24]; // Buffer for header data
+        memset(buf, 0, sizeof(buf));
 
         // Receive message on the socket, put contents in buf
-        if (recv(client_fd, buf, sizeof(memcache_req_header_t), MSG_WAITALL) == -1) {
-            perror("Recv()");
-            close(client_fd);
+        if (recv(client_fd, buf, 24, MSG_WAITALL) == -1) {
+            perror("Recv()?!");
+            fprintf(stderr, "errno = %d\n", errno);
+            // close(client_fd);
             return;
         }
+
+        printf("Raw header bytes:\n");
+        for (int i = 0; i < sizeof(buf); ++i) {
+            printf("%02x ", (uint8_t)buf[i]);
+        }
+        printf("\n");
 
         // Put buf's contents in a temp mcached header for our use
         memcache_req_header_t tmpHeader;
         tmpHeader.magic = buf[0];
         tmpHeader.opcode = buf[1];
-        tmpHeader.key_length = (uint16_t)((buf[2] << 8) | buf[3]);
+        tmpHeader.key_length = ((uint16_t)(uint8_t)buf[2] << 8) | (uint16_t)(uint8_t)buf[3];
         tmpHeader.extras_length = buf[4];
-        tmpHeader.vbucket_id = (uint16_t)((buf[6] << 8) | buf[7]);
-        tmpHeader.total_body_length = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) | ((uint32_t)buf[10] << 8) | (uint32_t)buf[11];
+        tmpHeader.vbucket_id = ((uint16_t)(uint8_t)buf[6] << 8) | (uint16_t)(uint8_t)buf[7];
+        tmpHeader.total_body_length = ((uint32_t)(uint8_t)buf[8] << 24) |
+                              ((uint32_t)(uint8_t)buf[9] << 16) |
+                              ((uint32_t)(uint8_t)buf[10] << 8) |
+                              (uint32_t)(uint8_t)buf[11];
+                         
+                              printf("Parsed header: opcode=0x%02x key_length=%u total_body_length=%u\n",
+                                tmpHeader.opcode, tmpHeader.key_length, tmpHeader.total_body_length);
+                         
         
         // Get the key and value
         // total_body_length includes the extras, key and value (body)
+        uint32_t body_length = tmpHeader.total_body_length;
+        uint8_t *body = malloc(body_length);
+
         // 1. Read in the rest of the body (extras, key, body)
-        char *body = malloc(tmpHeader.total_body_length);
         if (recv(client_fd, body, tmpHeader.total_body_length, MSG_WAITALL) != tmpHeader.total_body_length) {
             perror("recv body!!!");
             close(client_fd);
             return;
         }
+        
         // 2. Set pKey to point to the start of the key in the body (right after the extras field)
-        char *pKey = body;
-        // 3. Set pValue to point to the the start of the value in the body (right after key)
-        char *pValue = body + tmpHeader.key_length;
+        uint8_t *pKey = body;
+        // 3. Set pValue to point to the start of the value in the body (right after the key)
+        uint8_t *pValue = body + tmpHeader.key_length;
         // 4. Record the number of bytes that make up the value portion of the body
         uint32_t valueLen = tmpHeader.total_body_length - tmpHeader.key_length;
         uint32_t keyLen = tmpHeader.key_length;
-        // 5. Use strndup to copy the key and value instead of pointing to the stack-allocated buffer
-        uint16_t *key = malloc(tmpHeader.key_length);
-        memcpy(key, pKey, tmpHeader.key_length);
-        uint32_t *value = malloc(valueLen);
+
+        // 5. Allocate memory for key and value
+        uint8_t *key = malloc(keyLen);
+        if (key == NULL) {
+            perror("malloc for key");
+            return;
+        }
+
+        uint8_t *value = malloc(valueLen);
+        if (value == NULL) {
+            perror("malloc for value");
+            free(key);
+            return;
+        }
+
+        // 6. Copy key and value data into allocated memory
+        memcpy(key, pKey, keyLen);
         memcpy(value, pValue, valueLen);
 
         // Print
@@ -129,7 +185,7 @@ void handle_client(int client_fd) {
         printf("Total body length: %u\n", valueLen);
         
         // Calculate the key's hash
-        unsigned long keyHash = hash(key);
+        uint32_t keyHash = hash(key);
         printf("Calculated the key's hash!\n");
         // Print the fucking hashes (collisions?)
         // printf("Key: %hn | Hash: %lu\n\n", key, keyHash);
@@ -147,18 +203,19 @@ void handle_client(int client_fd) {
                     pthread_mutex_lock(&current->lock);
                     isFound = 1; // Set to true (we found the key!)
                     target = current;
+                    pthread_mutex_unlock(&current->lock);
                     break;
                 }
                 current = current->pNext;
             }
             if (isFound == 1) {
-                send_response(client_fd, CMD_GET, RES_OK, target->key_length, target->value_length, key, value);
+                printf("Is found bro!!!!!\n\n");
+                send_response(client_fd, CMD_GET, RES_OK, target->key_length, target->value_length, target->key, target->value);
 
-                pthread_mutex_unlock(&target->lock);
             }
             else {
                 // Send not found to the client
-                send_response(client_fd, CMD_GET, RES_NOT_FOUND, target->key_length, target->value_length, key, value);
+                send_response(client_fd, CMD_GET, RES_NOT_FOUND, 0, 0, NULL, NULL);
             }
         }
         else if (tmpHeader.opcode == CMD_ADD) {
@@ -175,7 +232,7 @@ void handle_client(int client_fd) {
             }
             if (isFound == 1) {
                 pthread_mutex_unlock(&current->lock);
-                send_response(client_fd, CMD_ADD, RES_EXISTS, current->key_length, current->value_length, key, value);
+                send_response(client_fd, CMD_ADD, RES_EXISTS, current->key_length, current->value_length, current->key, current->value);
             }
             else {
                 // Allocate memory for a new entry and add to the table
@@ -186,7 +243,7 @@ void handle_client(int client_fd) {
 
                 newEntry->hashKey = keyHash;
 
-                newEntry->value_length = htonl(tmpHeader.total_body_length - tmpHeader.key_length);
+                newEntry->value_length = tmpHeader.total_body_length - tmpHeader.key_length;
                 newEntry->value = malloc(newEntry->value_length);
                 memcpy(newEntry->value, value, newEntry->value_length);
 
@@ -206,7 +263,7 @@ void handle_client(int client_fd) {
                     last->pNext = newEntry;
                 }
                 pthread_mutex_unlock(&newEntry->lock);
-                send_response(client_fd, CMD_ADD, RES_OK, newEntry->key_length, newEntry->value_length, key, value);
+                send_response(client_fd, CMD_ADD, RES_OK, 0, 0, key, value);
             }
         }
         else if (tmpHeader.opcode == CMD_SET) {
@@ -219,9 +276,10 @@ void handle_client(int client_fd) {
                     pthread_mutex_lock(&current->lock);
                     free(current->value);
 
-                    current->value = malloc(current->value_length);
-                    memcpy(current->value, value, current->value_length);
-                    current->value_length = current->value_length;
+                    uint32_t new_value_len = tmpHeader.total_body_length - tmpHeader.key_length;
+                    current->value = malloc(new_value_len);
+                    memcpy(current->value, value, new_value_len);
+                    current->value_length = new_value_len;
 
                     pthread_mutex_unlock(&current->lock);
                     break;
@@ -238,19 +296,22 @@ void handle_client(int client_fd) {
                 newEntry->key_length = tmpHeader.key_length;
                 newEntry->key = malloc(newEntry->key_length);
                 memcpy(newEntry->key, key, newEntry->key_length);
-                newEntry->value_length = htonl(tmpHeader.total_body_length - tmpHeader.key_length);
-                newEntry->value = malloc(newEntry->value_length);
-                memcpy(newEntry->value, value, newEntry->value_length);
-                newEntry->pNext = table;
+
+                uint32_t new_value_len = tmpHeader.total_body_length - tmpHeader.key_length;
+                newEntry->value = malloc(new_value_len);
+                memcpy(newEntry->value, value, new_value_len);
+                newEntry->value_length = new_value_len;
 
                 // Insert at head of table (linked list)
                 newEntry->pNext = table;
                 table = newEntry;
                 pthread_mutex_unlock(&newEntry->lock);
-                send_response(client_fd, CMD_SET, RES_OK, newEntry->key_length, newEntry->value_length, key, value);
+                printf("Sending SET response: keylen=%u valuelen=%u total_body_length=%u\n", newEntry->key_length, newEntry->value_length, newEntry->key_length + newEntry->value_length);
+                send_response(client_fd, CMD_SET, RES_OK, newEntry->key_length, newEntry->value_length, newEntry->key, newEntry->value);
             }
             else {
-                send_response(client_fd, CMD_SET, RES_OK, current->key_length, current->value_length, key, value);
+                printf("Sending SET response: keylen=%u valuelen=%u total_body_length=%u\n", current->key_length, current->value_length, current->key_length + current->value_length);
+                send_response(client_fd, CMD_SET, RES_OK, current->key_length, current->value_length, current->key, current->value);
             }
         }
         // else if (tmpHeader.opcode == CMD_OUTPUT) {
@@ -318,20 +379,20 @@ void handle_client(int client_fd) {
                 pthread_mutex_destroy(&current->lock);
                 free(current);
 
-                send_response(client_fd, CMD_DELETE, RES_OK, 0, 0, key, value);
+                send_response(client_fd, CMD_DELETE, RES_OK, 0, 0, NULL, NULL);
             }
             else {
-                send_response(client_fd, CMD_DELETE, RES_NOT_FOUND, 0, 0, key, value);
+                send_response(client_fd, CMD_DELETE, RES_NOT_FOUND, 0, 0, NULL, NULL);
             }
         }
         else if (tmpHeader.opcode == CMD_VERSION) {
             // Send response containing server string
-            send_response(client_fd, CMD_SET, RES_OK, 0, 0, key, value); // The body won't send here because lengths are 0
+            send_response(client_fd, CMD_SET, RES_OK, 0, 0, NULL, NULL); // The body won't send here because lengths are 0
             
         }
         else {
             // Send error
-            send_response(client_fd, CMD_VERSION, RES_ERROR, 0, 0, key, value); // The body won't send here because lengths are 0
+            send_response(client_fd, CMD_VERSION, RES_ERROR, 0, 0, NULL, NULL); // The body won't send here because lengths are 0
         }
 
         free(key);

@@ -283,73 +283,73 @@ void* worker_thread(void *arg) {
     verify_correctness(thread_num, &hdr, &exp, valuer, value);
     free((void *)keyr);
 
-    // // SET
-    // keyr = NULL, valuer = NULL;
-    // value[vallen - 1] = 198;
-    // send_request(sock, CMD_SET, key, value, keylen, vallen, thread_num);
-    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    // exp.opcode = CMD_SET;
-    // exp.vbucket_id = htons(RES_OK);
-    // exp.total_body_length = htonl(0);
-    // verify_correctness(thread_num, &hdr, &exp, valuer, value);
+    // SET
+    keyr = NULL, valuer = NULL;
+    value[vallen - 1] = 198;
+    send_request(sock, CMD_SET, key, value, keylen, vallen, thread_num);
+    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    exp.opcode = CMD_SET;
+    exp.vbucket_id = htons(RES_OK);
+    exp.total_body_length = htonl(0);
+    verify_correctness(thread_num, &hdr, &exp, valuer, value);
 
-    // // GET
-    // keyr = NULL, valuer = NULL;
-    // send_request(sock, CMD_GET, key, NULL, keylen, 0, thread_num);
-    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    // exp.opcode = CMD_GET;
-    // exp.vbucket_id = htons(RES_OK);
-    // exp.total_body_length = htonl(vallen);
-    // verify_correctness(thread_num, &hdr, &exp, valuer, value);
-    // free((void *)keyr);
+    // GET
+    keyr = NULL, valuer = NULL;
+    send_request(sock, CMD_GET, key, NULL, keylen, 0, thread_num);
+    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    exp.opcode = CMD_GET;
+    exp.vbucket_id = htons(RES_OK);
+    exp.total_body_length = htonl(vallen);
+    verify_correctness(thread_num, &hdr, &exp, valuer, value);
+    free((void *)keyr);
 
-    // // DELETE
-    // keyr = NULL, valuer = NULL;
-    // send_request(sock, CMD_DELETE, key, NULL, keylen, 0, thread_num);
-    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    // exp.opcode = CMD_DELETE;
-    // exp.vbucket_id = htons(RES_OK);
-    // exp.total_body_length = htonl(0);
-    // verify_correctness(thread_num, &hdr, &exp, valuer, value);
+    // DELETE
+    keyr = NULL, valuer = NULL;
+    send_request(sock, CMD_DELETE, key, NULL, keylen, 0, thread_num);
+    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    exp.opcode = CMD_DELETE;
+    exp.vbucket_id = htons(RES_OK);
+    exp.total_body_length = htonl(0);
+    verify_correctness(thread_num, &hdr, &exp, valuer, value);
 
-    // // GET after DELETE
-    // keyr = NULL, valuer = NULL;
-    // send_request(sock, CMD_GET, key, NULL, keylen, 0, thread_num);
-    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    // exp.opcode = CMD_GET;
-    // exp.vbucket_id = htons(RES_NOT_FOUND);
-    // exp.total_body_length = htonl(0);
-    // verify_correctness(thread_num, &hdr, &exp, valuer, value);
+    // GET after DELETE
+    keyr = NULL, valuer = NULL;
+    send_request(sock, CMD_GET, key, NULL, keylen, 0, thread_num);
+    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    exp.opcode = CMD_GET;
+    exp.vbucket_id = htons(RES_NOT_FOUND);
+    exp.total_body_length = htonl(0);
+    verify_correctness(thread_num, &hdr, &exp, valuer, value);
 
-    // // VERSION
-    // keyr = NULL, valuer = NULL;
-    // send_request(sock, CMD_VERSION, key, NULL, keylen, 0, thread_num);
-    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    // exp.opcode = CMD_VERSION;
-    // exp.vbucket_id = htons(RES_OK);
-    // exp.total_body_length = htonl(strlen("C-Memcached 1.0"));
-    // verify_correctness(thread_num, &hdr, &exp, valuer, (uint8_t *) "C-Memcached 1.0");
-    // free((void*)keyr);
+    // VERSION
+    keyr = NULL, valuer = NULL;
+    send_request(sock, CMD_VERSION, key, NULL, keylen, 0, thread_num);
+    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    exp.opcode = CMD_VERSION;
+    exp.vbucket_id = htons(RES_OK);
+    exp.total_body_length = htonl(strlen("C-Memcached 1.0"));
+    verify_correctness(thread_num, &hdr, &exp, valuer, (uint8_t *) "C-Memcached 1.0");
+    free((void*)keyr);
 
-    // // DELETE something that doesn't exist
-    // keyr = NULL, valuer = NULL;
-    // key[keylen - 1] = 1;
-    // send_request(sock, CMD_DELETE, key, NULL, keylen, 0, thread_num);
-    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    // exp.opcode = CMD_DELETE;
-    // exp.vbucket_id = htons(RES_NOT_FOUND);
-    // exp.total_body_length = htonl(0);
-    // verify_correctness(thread_num, &hdr, &exp, valuer, value);
+    // DELETE something that doesn't exist
+    keyr = NULL, valuer = NULL;
+    key[keylen - 1] = 1;
+    send_request(sock, CMD_DELETE, key, NULL, keylen, 0, thread_num);
+    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    exp.opcode = CMD_DELETE;
+    exp.vbucket_id = htons(RES_NOT_FOUND);
+    exp.total_body_length = htonl(0);
+    verify_correctness(thread_num, &hdr, &exp, valuer, value);
 
-    // // OUTPUT   
-    // printf("sending output \n \n");
-    // keyr = NULL, valuer = NULL;
-    // send_request(sock, CMD_OUTPUT, NULL, NULL, 0, 0, thread_num);
-    // receive_response(sock, &hdr, &keyr, &valuer, thread_num);
-    // assert(hdr.magic == 0x81);
-    // assert(hdr.opcode == CMD_OUTPUT);
-    // assert(hdr.vbucket_id == htons(RES_OK));
-    // free(keyr);
+    // OUTPUT   
+    printf("sending output \n \n");
+    keyr = NULL, valuer = NULL;
+    send_request(sock, CMD_OUTPUT, NULL, NULL, 0, 0, thread_num);
+    receive_response(sock, &hdr, &keyr, &valuer, thread_num);
+    assert(hdr.magic == 0x81);
+    assert(hdr.opcode == CMD_OUTPUT);
+    assert(hdr.vbucket_id == htons(RES_OK));
+    free(keyr);
 
     close(sock);
     free(arg);
